@@ -27,10 +27,10 @@
     <button data-page="reports"><span class="icon">📊</span><span>التقارير</span></button>
     <button data-page="settings"><span class="icon">⚙</span><span>الإعدادات</span></button>
   </div>
-  <div class="sidebar-foot">يعمل محليًا على الجهاز مع حفظ البيانات تلقائيًا داخل المتصفح. استخدم النسخ الاحتياطي لحفظ نسخة خارجية من البيانات.</div>
+  <div class="sidebar-foot">البيانات مشتركة ومحفوظة في السحابة ويمكن الوصول إليها من أي جهاز. <strong id="syncStatus" style="display:block;margin-top:6px">جارٍ الاتصال…</strong></div>
 </aside>
 <main class="main">
-  <div class="topbar no-print"><div><strong id="pageTitle">الرئيسية</strong><div class="crumb">شركة بريق هجر لنظافة المباني</div></div><div class="top-actions"><button class="btn secondary" id="backupBtn">نسخة احتياطية</button><button class="btn ghost" id="restoreBtn">استيراد نسخة</button><button class="btn primary" id="quickAdd">+ إضافة</button></div></div>
+  <div class="topbar no-print"><div><strong id="pageTitle">الرئيسية</strong><div class="crumb">شركة بريق هجر لنظافة المباني</div></div><div class="top-actions"><button class="btn secondary" id="cloudRefreshBtn">تحديث البيانات</button><button class="btn secondary" id="backupBtn">نسخة احتياطية</button><button class="btn ghost" id="restoreBtn">استيراد نسخة</button><button class="btn primary" id="quickAdd">+ إضافة</button></div></div>
   <div class="content">
     <section class="page active" id="page-dashboard">
       <div class="hero"><div><h2>لوحة الإدارة</h2><p>متابعة العملاء، العاملين، الرواتب، العقود، الطلبات والقيود اليومية من مكان واحد.</p></div><div class="company">بريق هجر • تشغيل محلي</div></div>
@@ -71,11 +71,91 @@
 <div class="print-area" id="printArea"></div>
 <script>
 const KEY='bareeq_hijr_cleaning_v1';
+const SUPABASE_URL='https://cdbcyxocwoazhzeavicr.supabase.co';
+const SUPABASE_KEY='sb_publishable_KPHLO98njZM4hrDXBRbXLw_rcSGLUEd';
+const SUPABASE_TABLE='app_state';
 const defaultState={settings:{company:'شركة بريق هجر لنظافة المباني',phone:'',address:'',cr:'',note:''},clients:[],employees:[],payroll:[],contracts:[],vouchers:[],orders:[],journals:[]};
-let state=load();
-function load(){try{const x=localStorage.getItem(KEY);return x?normalize(JSON.parse(x)):structuredClone(defaultState)}catch(e){return structuredClone(defaultState)}}
+let state=loadLocal();
+let cloudReady=false;
+let cloudSaving=false;
+let cloudSaveTimer=null;
+let lastCloudUpdatedAt='';
+function loadLocal(){try{const x=localStorage.getItem(KEY);return x?normalize(JSON.parse(x)):structuredClone(defaultState)}catch(e){return structuredClone(defaultState)}}
 function normalize(x){return {...structuredClone(defaultState),...x,settings:{...defaultState.settings,...(x.settings||{})}}}
-function save(){localStorage.setItem(KEY,JSON.stringify(state));refreshAll()}
+function hasRealData(x){return !!(x && (x.clients?.length||x.employees?.length||x.payroll?.length||x.contracts?.length||x.vouchers?.length||x.orders?.length||x.journals?.length))}
+function localState(){return normalize(state)}
+function setSyncStatus(text,ok=true){const el=document.getElementById('syncStatus');if(el){el.textContent=text;el.style.color=ok?'#087b4e':'#b42332'}}
+async function cloudFetch(){
+  const r=await fetch(`${SUPABASE_URL}/rest/v1/${SUPABASE_TABLE}?id=eq.1&select=id,data,updated_at`,{headers:{apikey:SUPABASE_KEY,Authorization:`Bearer ${SUPABASE_KEY}`}});
+  if(!r.ok)throw new Error(`Cloud read ${r.status}`);
+  const rows=await r.json();
+  return rows[0]||null;
+}
+async function cloudWrite(data){
+  const r=await fetch(`${SUPABASE_URL}/rest/v1/${SUPABASE_TABLE}?id=eq.1`,{method:'PATCH',headers:{apikey:SUPABASE_KEY,Authorization:`Bearer ${SUPABASE_KEY}`,'Content-Type':'application/json','Prefer':'return=representation'},body:JSON.stringify({data,updated_at:new Date().toISOString()})});
+  if(!r.ok){const t=await r.text();throw new Error(`Cloud write ${r.status}: ${t}`)}
+  const rows=await r.json();
+  return rows[0]||null;
+}
+async function initializeCloud(){
+  setSyncStatus('جارٍ الاتصال بالسحابة…',true);
+  try{
+    const remote=await cloudFetch();
+    if(remote && remote.data && Object.keys(remote.data).length){
+      state=normalize(remote.data);
+      lastCloudUpdatedAt=remote.updated_at||'';
+      localStorage.setItem(KEY,JSON.stringify(state));
+      cloudReady=true;
+      refreshAll();
+      setSyncStatus('متصل بالسحابة ✓',true);
+    }else{
+      const local=localState();
+      state=hasRealData(local)?local:structuredClone(defaultState);
+      const saved=await cloudWrite(state);
+      lastCloudUpdatedAt=saved?.updated_at||new Date().toISOString();
+      localStorage.setItem(KEY,JSON.stringify(state));
+      cloudReady=true;
+      refreshAll();
+      setSyncStatus('تم إنشاء النسخة المشتركة ✓',true);
+    }
+  }catch(e){
+    cloudReady=false;
+    refreshAll();
+    setSyncStatus('تعذر الاتصال بالسحابة — يعمل محليًا مؤقتًا',false);
+    console.error(e);
+  }
+}
+function save(){
+  localStorage.setItem(KEY,JSON.stringify(state));
+  refreshAll();
+  if(!cloudReady)return;
+  clearTimeout(cloudSaveTimer);
+  cloudSaveTimer=setTimeout(async()=>{
+    if(cloudSaving)return;
+    cloudSaving=true;
+    setSyncStatus('جارٍ حفظ التغييرات…',true);
+    try{
+      const saved=await cloudWrite(localState());
+      lastCloudUpdatedAt=saved?.updated_at||new Date().toISOString();
+      setSyncStatus('تم الحفظ على السحابة ✓',true);
+    }catch(e){
+      setSyncStatus('فشل الحفظ السحابي — البيانات محفوظة محليًا',false);
+      console.error(e);
+    }finally{cloudSaving=false}
+  },250);
+}
+async function refreshFromCloud(silent=false){
+  try{
+    const remote=await cloudFetch();
+    if(remote && remote.data && remote.updated_at!==lastCloudUpdatedAt){
+      state=normalize(remote.data);
+      lastCloudUpdatedAt=remote.updated_at||'';
+      localStorage.setItem(KEY,JSON.stringify(state));
+      refreshAll();
+      if(!silent)setSyncStatus('تم تحديث البيانات من السحابة ✓',true);
+    }else if(!silent){setSyncStatus('البيانات محدثة ✓',true)}
+  }catch(e){if(!silent)setSyncStatus('تعذر تحديث البيانات من السحابة',false);console.error(e)}
+}
 function seedDemoData(){
   const hasData=state.clients.length||state.employees.length||state.payroll.length||state.contracts.length||state.vouchers.length||state.orders.length||state.journals.length;
   const oldDemo=hasData && state.settings?.note?.includes('بيانات تجريبية') && state.clients.every(x=>String(x.id||'').startsWith('CL-DEMO-'));
@@ -157,7 +237,7 @@ function backup(){download('bareeq-hijr-backup-'+today()+'.json',JSON.stringify(
 function restore(){document.getElementById('importFile').click()}
 document.getElementById('importFile').addEventListener('change',async e=>{const f=e.target.files[0];if(!f)return;try{state=normalize(JSON.parse(await f.text()));save();alert('تم استيراد النسخة بنجاح')}catch(err){alert('الملف غير صالح')}});
 document.getElementById('backupBtn').onclick=backup;document.getElementById('backupBtn2').onclick=backup;document.getElementById('restoreBtn').onclick=restore;document.getElementById('restoreBtn2').onclick=restore;
-function resetAll(){if(confirm('سيتم حذف جميع البيانات نهائيًا من هذا المتصفح. هل أنت متأكد؟')){localStorage.removeItem(KEY);state=structuredClone(defaultState);refreshAll();alert('تمت إعادة النظام للوضع الفارغ')}}
+async function resetAll(){if(confirm('سيتم حذف جميع البيانات نهائيًا من السحابة وجميع الأجهزة. هل أنت متأكد؟')){state=structuredClone(defaultState);localStorage.setItem(KEY,JSON.stringify(state));refreshAll();if(cloudReady){try{await cloudWrite(state);setSyncStatus('تم تفريغ البيانات المشتركة ✓',true)}catch(e){setSyncStatus('فشل تفريغ السحابة',false)}}alert('تمت إعادة النظام للوضع الفارغ')}}
 
 ['clientSearch','employeeSearch','orderSearch'].forEach(idv=>document.getElementById(idv).addEventListener('input',()=>{if(idv==='clientSearch')renderClients(v(idv));if(idv==='employeeSearch')renderEmployees(v(idv));if(idv==='orderSearch')renderOrders(v(idv))}));
 document.getElementById('payrollMonth').addEventListener('change',e=>{const m=e.target.value;document.querySelectorAll('#payrollBody tr').forEach(tr=>tr.style.display=!m||tr.cells[0]?.textContent===m?'':'none')});
@@ -168,6 +248,9 @@ function printOrder(idv){const x=state.orders.find(a=>a.id===idv);if(!x)return;p
 function printVoucher(idv){const x=state.vouchers.find(a=>a.id===idv);if(!x)return;printHTML(x.vType,[x.vType,'البيانات'],[['رقم السند',x.no],['الطرف',x.party],['التاريخ',x.date],['المبلغ',money(x.amount)],['طريقة السداد',x.method],['البيان',x.notes]])}
 function printPayroll(idv){const x=state.payroll.find(a=>a.id===idv);if(!x)return;printHTML('مسير راتب',[ 'البند','القيمة'],[['الشهر',x.month],['العامل',x.employeeName],['الأساسي',money(x.basic)],['الإضافي',money(x.extra)],['الخصم',money(x.deduct)],['الصافي',money(Number(x.basic)+Number(x.extra)-Number(x.deduct))],['الحالة',x.status]])}
 refreshAll();
+document.getElementById('cloudRefreshBtn').onclick=()=>refreshFromCloud(false);
+initializeCloud();
+setInterval(()=>{if(document.visibilityState==='visible' && !document.querySelector('.modal.show') && !cloudSaving)refreshFromCloud(true)},15000);
 </script>
 </body>
 </html>
